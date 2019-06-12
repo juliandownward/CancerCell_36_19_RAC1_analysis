@@ -1,0 +1,180 @@
+---
+title: "RNA-Seq Data Analysis: Acute activation of ER-RAC1 P29S in melanocytes GSE118349"
+author: "philip.east@crick.ac.uk"
+date: 'Compiled: `r format(Sys.time(), "%d %B, %Y @ %H:%M:%S")`'
+output:
+  html_document:
+    df_print: tibble
+    toc: true
+    toc_depth: 5
+    toc_float: true
+---
+
+```{css setup_css, echo=FALSE}
+body .main-container {
+  max-width: 100%;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=15)
+```
+
+```{r r_setup,message=FALSE,warning=FALSE}
+library( DESeq2 )
+library( ggplot2 )
+library( limma )
+library( scales )
+
+options( max.print=300, width=100 )
+```
+
+# Introduction
+
+This R markdown document details the analysis of RNA-Seq data
+submitted to [GEO
+GES118349](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118349) 
+and published in Cancer Cell 36, 1-16 July 8, 2019.
+
+An ER-RAC1 P29S fusion protein was stably expressed in the
+spontaneously immortalized mouse melanocyte cell line melan-a. The
+fusion protein was activated by treatment with 500 nM
+4OH-tamoxifen. RNA was isolated and sequenced at 0 h, 4 h and 40 h
+post-treatment. The gene expression profiles at 4 h and 40 h were
+compared to the 0 h time-point. To control for effects induced by
+4OH-tamoxifen independent from ER-RAC1 P29S, we performed the same
+experiment in melan-a cells transduced with an empty vector.
+
+# Load ExpressionSets
+
+Here we load the data as ExpressionSet objects containing raw
+counts and TPMs.
+
+```{r load_data,message=FALSE,warning=FALSE}
+load( file = "eset_counts_GSE118349.rda" )
+eset_counts
+load( file = "eset_TPM_GSE118349.rda" )
+eset_TPM
+```
+
+# Experimental Design
+
+```{r design,message=FALSE,warning=FALSE}
+kable( pData( eset_counts ) )
+```
+
+# Gene Filtering
+
+Here we remove genes with a mean TPM of less that 1 across all samples.
+
+```{r filter,message=FALSE,warning=FALSE}
+detected <- apply( exprs( eset_TPM ), 1, function( x ) mean( x ) > 1 )
+eset_counts <- eset_counts[ detected, ]
+eset_counts
+```
+
+# DESeq2 Analysis
+
+To determine parental and inducible timepoint specific transcriptional changes we ran a
+DESeq2 analysis on each of the groups separately. Differential genes
+were selected using a < than 0.05 fdr threshold.
+
+```{r deseq2,message=FALSE,warning=FALSE}
+res <- sapply( levels( eset_counts$cell_line ), function( cell ) {
+    eset_cell <- eset_counts[, eset_counts$cell_line %in% cell ]
+    dds <- DESeqDataSetFromMatrix( eset_cell,
+                                  colData = pData( eset_cell ),
+                                  design = ~ treatment.hours )
+    dds <- DESeq( dds )
+    l <- sapply( c("treatment.hours4", "treatment.hours40" ), function( numerator ) {
+                    results( dds,
+                             list( numerator, "treatment.hours0" ),
+                            cooksCutoff = FALSE )
+                }, simplify = FALSE )
+    l
+}, simplify = FALSE )
+res <- unlist( res )
+decide <- lapply( res, function( y ){
+                     y <- y[ !is.na( y$padj ), ]
+                     y[ y$padj < 0.05, ]
+                 } )
+```
+
+# Replicate group means
+
+Here we calculate mean normalised counts across replicates.
+
+```{r rgm,message=FALSE,warning=FALSE}
+## output results
+pData( eset_counts )$targets <- as.factor(
+    paste(
+        eset_counts$cell_line,
+        eset_counts$treatment.hours,
+        sep = "_" ) )
+
+dds <- DESeqDataSetFromMatrix( exprs( eset_counts ),
+                              colData = pData( eset_counts ),
+                              design = ~targets )
+dds <- DESeq( dds )
+
+design <- model.matrix( ~0 + pData( eset_counts )$targets )
+colnames( design ) <- gsub( "pData\\(eset_counts\\)\\$targets", "", colnames( design ) )
+contrasts <- makeContrasts(
+    inducible.treatment.hours4 = inducible_4-inducible_0,
+    inducible.treatment.hours40 = inducible_40-inducible_0,
+    parental.treatment.hours4 = parental_4-inducible_0,
+    parental.treatment.hours40 = parental_40-inducible_0,
+    levels = design )
+
+RGMcounts <- by( t( counts( dds, normalized=TRUE ) ), dds$targets, function( mat ) {
+                    apply( mat, 2, mean )
+                } )
+RGMcounts <- do.call( 'cbind', RGMcounts )
+```
+
+# Results
+
+```{r results,message=FALSE,warning=FALSE}
+for( i in names( decide )[ 1:2 ] ){
+    if( length( genes <- rownames( decide[[ i ]] ) ) > 0 ) {
+        treatment <- rownames( contrasts )[ contrasts[, i ] == 1 ]
+        control <- rownames( contrasts )[ contrasts[, i ] == -1 ]
+        dbase <- data.frame(
+            ID = rownames( decide[[ i ]] ),
+            symbol = fData( eset_counts )[ genes, 11 ],
+            RGMcounts[ genes, ],
+            as.data.frame( decide[[ i ]] )[, c( 1, 2, 5, 6 ) ],
+            fData( eset_counts )[ genes, ] )
+        write.table( dbase, file = paste( i, "differential_genes.txt", sep = "_" ),
+                    sep = "\t", quote = FALSE, row.names = FALSE )
+    }
+}
+```
+
+# MVA
+```{r mva,message=FALSE,warning=FALSE}
+plotdat <- data.frame( M = unlist( lapply( res, function( mat ) mat$log2FoldChange ) ),
+                      A = unlist( lapply( res, function( mat ) mat$baseMean ) ),
+                      diffGenes = unlist( lapply( res, function( mat ) mat$padj < 0.1 ) ),
+                      contrast = unlist( lapply( names( res ), function( matN ) {
+                                                    rep( matN, nrow( res[[ matN ]] ) )
+                                                } ) ) )
+
+gg <- ggplot( plotdat, aes( x=A, y=M, color=diffGenes ) ) +
+    geom_point() +
+        facet_wrap( ~contrast, nrow = 2 ) +
+            scale_x_continuous( trans=log2_trans() ) +
+                scale_color_manual(values=c( "grey", "blue1" ) ) +
+                    labs( title = "Treatment / Hour 0",
+                        y = "log2( treatment hour / hour 0 )",
+                         x = "Mean normalise count" ) +
+                        geom_abline( intercept = 0, slope = 0, color = "white" )
+print( gg )
+```
+
+# R Session Info
+
+```{r session,message=FALSE,warning=FALSE}
+sessionInfo()
+```

@@ -1,0 +1,153 @@
+---
+title: "RNA-Seq Data Analysis: Endogenous RAC1 P29S in mouse melanoma GSE118344"
+author: "philip.east@crick.ac.uk"
+date: 'Compiled: `r format(Sys.time(), "%d %B, %Y @ %H:%M:%S")`'
+output:
+  html_document:
+    df_print: tibble
+    toc: true
+    toc_depth: 5
+    toc_float: true
+---
+
+```{css setup_css, echo=FALSE}
+body .main-container {
+  max-width: 100%;
+}
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen=15)
+```
+
+```{r r_setup,message=FALSE,warning=FALSE}
+library( DESeq2 )
+library( ggplot2 )
+library( limma )
+library( xlsx )
+options( max.print=300, width=100 )
+```
+
+# Introduction
+
+This R markdown document details the analysis of RNA-Seq data
+submitted to [GEO
+GES118344](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118344) 
+and published in Cancer Cell 36, 1-16 July 8, 2019.
+
+Transgenic mice with a conditional knock-in of the P29S mutation in
+the endogenous Rac1 locus were generated and crossed onto C57BL/6J,
+Tyr-CreER;BrafCA/wt;Ptenfl/wt mice. Melanomas were induced by topical
+4OH-tamoxifen. We compared the gene expression profile in whole tumour
+lysates from Tyr-CreER+/-;Ptenfl/wt;BrafCA/wt;Rac1LSL-P29S/wt mice
+versus Tyr-CreER+/-;Ptenfl/wt;BrafCA/wt;Rac1wt/wt mice (n = 6 tumours
+from 5-6 animals per group).
+
+# Load ExpressionSets
+
+Here we load the data as ExpressionSet objects containing raw
+counts and TPMs.
+
+```{r load_data,message=FALSE,warning=FALSE}
+load( file = "eset_counts_GSE118344.rda" )
+eset_counts
+load( file = "eset_TPM_GSE118344.rda" )
+eset_TPM
+```
+
+# Experimental Design
+
+```{r design,message=FALSE,warning=FALSE}
+kable( pData( eset_counts ) )
+```
+
+# rlog count data
+
+```{r rlog,message=FALSE,warning=FALSE}
+rlog_mat <- DESeq2::rlog( exprs( eset_counts ) )
+```
+
+# Filter genes
+
+Remove genes with a zero mean across all samples.
+
+```{r filter,message=FALSE,warning=FALSE}
+f <- rowMeans( rlog_mat ) > 0
+eset_counts <- eset_counts[ f, ]
+eset_TPM <- eset_TPM[ f, ]
+rlog_mat <- rlog_mat[ f, ]
+```
+
+# DESeq2 Analysis
+
+To determine endogenous RAC1 mutant dependent transcriptional changes
+we ran a DESeq2 analysis across RAC1 mutant and wildtype
+samples. Differential genes were selected using a 0.05 fdr threshold.
+
+```{r deseq2,message=FALSE,warning=FALSE}
+dds <- DESeqDataSetFromMatrix(countData = round( exprs( eset_counts ) ),
+                              colData = pData( eset_counts ),
+                              design = ~gbg )
+
+dds <- DESeq( dds )
+resobj <- results( dds, alpha = 0.05 )
+res <- as.data.frame( resobj )
+res <- res[ !is.na( res$padj ), ]
+decide <- res[ res$padj < 0.05, ]
+```
+
+# Replicate group mean
+
+Here we calculate mean log2 normalised counts across replicates.
+
+```{r rgm,message=FALSE,warning=FALSE}
+rld <- DESeq2::rlog( dds )
+rgm <- do.call( 'cbind', by( t( assay( rld ) ), colData( dds )$gbg, function( mat ) {
+    colMeans( mat )
+} ) )
+rgmTPM <- do.call( 'cbind', by( t( exprs( eset_TPM ) ), eset_TPM$gbg, function( mat ) {
+    colMeans( mat )
+} ) )
+```
+
+# Results
+
+```{r results,message=FALSE,warning=FALSE}
+genes <- rownames( decide )
+dbase <- data.frame( gene = genes,
+                    gene.symbol = fData( eset_counts[ genes, ] )$gene_name,
+                    round( rgm[ genes, ], 3 ),
+                    TPM = round( rgmTPM[ genes, ], 3 ),
+                    log2FoldChange = decide[, "log2FoldChange" ],
+                    p.value = decide[ , "pvalue" ],
+                    fData( eset_counts[ genes, ] ) )
+dbase[ is.na( dbase ) ] <- ""
+
+write.xlsx( dbase, file = "RAC.vs.wt.melanoma.xlsx",
+           sheetName = "RAC1vswt", row.names = FALSE )
+```
+
+# PCA
+
+```{r pca,message=FALSE,warning=FALSE}
+gg <- plotPCA( rld,
+              intgroup = "gbg",
+              ntop = 1000 ) +
+    labs( title = "Sample PCA", color="gbg" )
+gg <- gg + geom_label( label = eset_counts$sample.id,
+                      alpha = 0.2,
+                      nudge_x = 10 )
+gg
+```
+
+# R Session Info
+
+```{r session,message=FALSE,ywarning=FALSE}
+sessionInfo()
+```
+
+
+
+
+
